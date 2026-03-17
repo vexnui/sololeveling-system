@@ -4,6 +4,10 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Player, Quest, BossChallenge, Screen, ChatMessage, SystemMessage, Notification } from '@/types';
 import { INITIAL_PLAYER, INITIAL_QUESTS, INITIAL_BOSS, SYSTEM_MESSAGES, getXpForLevel, getRankForLevel, getAuraForLevel } from '@/lib/gameData';
+import { updateUserProfile, addXpToUser, incrementQuestsCompleted } from '@/lib/user_service';
+import { completeQuest as dbCompleteQuest, failQuest as dbFailQuest, insertPenaltyQuest } from '@/lib/quest_service';
+import type { UserProfile } from '@/lib/user_service';
+import type { DbQuest } from '@/lib/quest_service';
 
 interface GameState {
   // Navigation
@@ -12,12 +16,18 @@ interface GameState {
   showSplash: boolean;
   setShowSplash: (val: boolean) => void;
 
+  // Auth user id (set after login)
+  userId: string | null;
+  setUserId: (id: string | null) => void;
+
   // Player
   player: Player;
   updatePlayer: (updates: Partial<Player>) => void;
+  loadPlayerFromProfile: (profile: UserProfile) => void;
 
   // Quests
   quests: Quest[];
+  loadQuestsFromDb: (dbQuests: DbQuest[]) => void;
   completeQuest: (id: string) => void;
   failQuest: (id: string) => void;
 
@@ -54,6 +64,21 @@ function generateId(): string {
   return Math.random().toString(36).slice(2, 11);
 }
 
+function dbQuestToLocal(q: DbQuest): Quest {
+  return {
+    id: q.id,
+    title: q.title,
+    description: q.description,
+    type: q.type,
+    status: q.status,
+    xpReward: q.xpReward,
+    category: q.category,
+    difficulty: q.difficulty,
+    icon: q.icon,
+    completedAt: q.completedAt ? new Date(q.completedAt).getTime() : undefined,
+  };
+}
+
 export const useGameStore = create<GameState>()(
   persist(
     (set, get) => ({
@@ -62,19 +87,47 @@ export const useGameStore = create<GameState>()(
       setScreen: (screen) => set({ currentScreen: screen }),
       setShowSplash: (val) => set({ showSplash: val }),
 
+      userId: null,
+      setUserId: (id) => set({ userId: id }),
+
       player: INITIAL_PLAYER,
       updatePlayer: (updates) => set((s) => ({ player: { ...s.player, ...updates } })),
+      loadPlayerFromProfile: (profile: UserProfile) => {
+        set({
+          player: {
+            name: profile.username,
+            level: profile.level,
+            rank: profile.rank as Player['rank'],
+            xp: profile.xp,
+            xpToNextLevel: getXpForLevel(profile.level + 1),
+            aura: profile.aura as Player['aura'],
+            stats: profile.stats,
+            missedDays: profile.missedDays,
+            totalQuestsCompleted: profile.totalQuestsCompleted,
+            longestStreak: profile.longestStreak,
+            currentStreak: profile.currentStreak,
+            joinedAt: new Date(profile.createdAt).getTime(),
+            plan: profile.plan as Player['plan'],
+            unlockedAbilities: profile.unlockedAbilities,
+          },
+        });
+      },
 
       quests: INITIAL_QUESTS,
+      loadQuestsFromDb: (dbQuests: DbQuest[]) => {
+        set({ quests: dbQuests.map(dbQuestToLocal) });
+      },
+
       completeQuest: (id) => {
         const state = get();
         const quest = state.quests.find((q) => q.id === id);
         if (!quest || quest.status === 'completed') return;
 
         const gainedXp = quest.xpReward;
+
+        // Optimistic local update first
         const newXp = state.player.xp + gainedXp;
         let { level, xpToNextLevel, rank, aura } = state.player;
-
         let remainingXp = newXp;
         let leveled = false;
         let newLevelNum = level;
@@ -102,7 +155,6 @@ export const useGameStore = create<GameState>()(
             rank,
             aura,
             totalQuestsCompleted: s.player.totalQuestsCompleted + 1,
-            currentStreak: s.player.currentStreak,
           },
         }));
 
@@ -119,20 +171,45 @@ export const useGameStore = create<GameState>()(
           type: 'questcomplete',
           message: `Quest complete! +${gainedXp} XP`,
         });
+
+        // Sync to Supabase in background
+        const userId = state.userId;
+        if (userId) {
+          dbCompleteQuest(id, userId).catch(console.error);
+          addXpToUser(userId, state.player.level, state.player.xp, gainedXp).catch(console.error);
+          incrementQuestsCompleted(userId, state.player.totalQuestsCompleted).catch(console.error);
+        }
       },
 
       failQuest: (id) => {
+        const state = get();
+        const quest = state.quests.find((q) => q.id === id);
+
         set((s) => ({
           quests: s.quests.map((q) =>
             q.id === id ? { ...q, status: 'failed' } : q
           ),
           penaltyActive: true,
         }));
+
         get().addSystemMessage({
           type: 'penalty',
           title: 'QUEST FAILED — PENALTY ACTIVATED',
           content: 'Weakness detected. A penalty protocol has been initiated. Complete the assigned punishment to continue.',
         });
+
+        // Sync to Supabase
+        const userId = state.userId;
+        if (userId && quest) {
+          dbFailQuest(id, userId).catch(console.error);
+          insertPenaltyQuest(userId, quest.title).then((penaltyQuest) => {
+            if (penaltyQuest) {
+              set((s) => ({
+                quests: [...s.quests, dbQuestToLocal(penaltyQuest)],
+              }));
+            }
+          }).catch(console.error);
+        }
       },
 
       boss: INITIAL_BOSS,
@@ -202,10 +279,10 @@ export const useGameStore = create<GameState>()(
       name: 'systemx-storage',
       partialize: (state) => ({
         player: state.player,
-        quests: state.quests,
         boss: state.boss,
         chatMessages: state.chatMessages,
         systemMessages: state.systemMessages,
+        // Note: quests now come from Supabase, not persisted locally
       }),
     }
   )

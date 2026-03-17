@@ -1,6 +1,8 @@
 'use client';
 
+import { useState } from 'react';
 import { useGameStore } from '@/store/gameStore';
+import { useAuth } from '@/context/AuthContext';
 import { HudCard } from '@/components/ui/HudCard';
 import { XpBar } from '@/components/ui/XpBar';
 import { RankBadge } from '@/components/ui/RankBadge';
@@ -8,12 +10,22 @@ import { RANK_COLORS, AURA_COLORS } from '@/lib/gameData';
 
 export function HomeScreen() {
   const { player, quests, systemMessages, setScreen, setShowPenaltyScreen, penaltyActive } = useGameStore();
+  const { signOut, userProfile } = useAuth();
+  const [signingOut, setSigningOut] = useState(false);
   const auraColor = AURA_COLORS[player.aura] || '#00d4ff';
   const rankColor = RANK_COLORS[player.rank] || '#888888';
 
   const todayQuests = quests.filter((q) => q.type === 'daily' || q.type === 'side');
   const completedToday = todayQuests.filter((q) => q.status === 'completed').length;
   const unreadMessages = systemMessages.filter((m) => !m.read).length;
+
+  // Use profile data if available, fall back to store
+  const displayName = userProfile?.username ?? player.name;
+
+  async function handleSignOut() {
+    setSigningOut(true);
+    await signOut();
+  }
 
   return (
     <div className="screen-enter pb-24 pt-4 px-4 space-y-4 min-h-screen grid-bg">
@@ -27,25 +39,38 @@ export function HomeScreen() {
             className="text-lg font-black tracking-widest font-mono glitch"
             style={{ color: '#ffffff', textShadow: '0 0 15px #00d4ff60' }}
           >
-            {player.name}
+            {displayName}
           </h1>
         </div>
-        <div className="relative">
-          <button
-            onClick={() => setScreen('chat')}
-            className="w-10 h-10 rounded-lg flex items-center justify-center border border-[#00d4ff22] bg-[#0f0f1a] text-lg"
-            style={{ boxShadow: '0 0 10px #00d4ff20' }}
-          >
-            🔔
-          </button>
-          {unreadMessages > 0 && (
-            <div
-              className="absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold font-mono"
-              style={{ background: '#ff003c', boxShadow: '0 0 8px #ff003c' }}
+        <div className="flex items-center gap-2">
+          {/* Notifications */}
+          <div className="relative">
+            <button
+              onClick={() => setScreen('chat')}
+              className="w-10 h-10 rounded-lg flex items-center justify-center border border-[#00d4ff22] bg-[#0f0f1a] text-lg"
+              style={{ boxShadow: '0 0 10px #00d4ff20' }}
             >
-              {unreadMessages}
-            </div>
-          )}
+              🔔
+            </button>
+            {unreadMessages > 0 && (
+              <div
+                className="absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold font-mono"
+                style={{ background: '#ff003c', boxShadow: '0 0 8px #ff003c' }}
+              >
+                {unreadMessages}
+              </div>
+            )}
+          </div>
+          {/* Logout */}
+          <button
+            onClick={handleSignOut}
+            disabled={signingOut}
+            className="w-10 h-10 rounded-lg flex items-center justify-center border border-[#ff003c22] bg-[#0f0f1a] text-sm font-mono font-bold transition-all"
+            style={{ color: '#ff003c44', boxShadow: '0 0 8px #ff003c10' }}
+            title="DISCONNECT"
+          >
+            {signingOut ? '…' : '⏻'}
+          </button>
         </div>
       </div>
 
@@ -272,6 +297,18 @@ export function HomeScreen() {
           </div>
         </HudCard>
       )}
+
+      {/* Disconnect button (bottom, subtle) */}
+      <div className="flex justify-center pt-2 pb-2">
+        <button
+          onClick={handleSignOut}
+          disabled={signingOut}
+          className="text-[9px] tracking-[3px] font-mono uppercase transition-colors"
+          style={{ color: '#ffffff15' }}
+        >
+          {signingOut ? 'DISCONNECTING...' : '[ DISCONNECT FROM SYSTEM ]'}
+        </button>
+      </div>
     </div>
   );
 }
